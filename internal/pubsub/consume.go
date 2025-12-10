@@ -42,7 +42,9 @@ func DeclareAndBind(
 		queueType != Durable, // delete when unused
 		queueType != Durable, // exclusive
 		false,                // no-wait
-		nil,                  // args
+		amqp.Table{
+			"x-dead-letter-exchange": "peril_dlx",
+		}, // args
 	)
 	if err != nil {
 		return nil, amqp.Queue{}, fmt.Errorf("could not declare queue: %v", err)
@@ -93,13 +95,10 @@ func SubscribeJSON[T any](
 			switch acktype {
 			case Ack:
 				m.Ack(false)
-				log.Println("message acknowleged")
 			case NackRequeue:
 				m.Nack(false, true)
-				log.Println("message neg acknowleged, requeue")
 			case NackDiscard:
 				m.Nack(false, false)
-				log.Println("message neg acknowleged, discard")
 			default:
 				log.Println("message unknown")
 			}

@@ -1,9 +1,10 @@
 package pubsub
 
 import (
+	"bytes"
+	"encoding/gob"
 	"encoding/json"
 	"fmt"
-	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -66,44 +67,90 @@ func SubscribeJSON[T any](
 	queueType SimpleQueueType, // an enum to represent "durable" or "transient"
 	handler func(T) AckType,
 ) error {
+	return subscribe[T](
+		conn,
+		exchange,
+		queueName,
+		key,
+		queueType,
+		handler,
+		func(data []byte) (T, error) {
+			var target T
+			err := json.Unmarshal(data, &target)
+			return target, err
+		},
+	)
+}
 
-	ch, que, err := DeclareAndBind(conn, exchange, queueName, key, queueType)
+func SubscribeGob[T any](
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	key string,
+	queueType SimpleQueueType, // an enum to represent "durable" or "transient"
+	handler func(T) AckType,
+) error {
+	return subscribe[T](
+		conn,
+		exchange,
+		queueName,
+		key,
+		queueType,
+		handler,
+		func(data []byte) (T, error) {
+			buffer := bytes.NewBuffer(data)
+			decoder := gob.NewDecoder(buffer)
+			var target T
+			err := decoder.Decode(&target)
+			return target, err
+		},
+	)
+}
+
+func subscribe[T any](
+	conn *amqp.Connection,
+	exchange,
+	queueName,
+	key string,
+	queueType SimpleQueueType,
+	handler func(T) AckType,
+	unmarshaller func([]byte) (T, error),
+) error {
+	ch, queue, err := DeclareAndBind(conn, exchange, queueName, key, queueType)
 	if err != nil {
 		return fmt.Errorf("could not declare and bind queue: %v", err)
 	}
 
-	msgs, err := ch.Consume(que.Name, "", false, false, false, false, nil)
+	msgs, err := ch.Consume(
+		queue.Name, // queue
+		"",         // consumer
+		false,      // auto-ack
+		false,      // exclusive
+		false,      // no-local
+		false,      // no-wait
+		nil,        // args
+	)
 	if err != nil {
 		return fmt.Errorf("could not consume messages: %v", err)
 	}
 
-	unmarshaller := func(data []byte) (T, error) {
-		var target T
-		err := json.Unmarshal(data, &target)
-		return target, err
-	}
-
 	go func() {
 		defer ch.Close()
-		for m := range msgs {
-			target, err := unmarshaller(m.Body)
+		for msg := range msgs {
+			target, err := unmarshaller(msg.Body)
 			if err != nil {
 				fmt.Printf("could not unmarshal message: %v\n", err)
 				continue
 			}
-			acktype := handler(target)
-			switch acktype {
+			switch handler(target) {
 			case Ack:
-				m.Ack(false)
-			case NackRequeue:
-				m.Nack(false, true)
+				msg.Ack(false)
 			case NackDiscard:
-				m.Nack(false, false)
-			default:
-				log.Println("message unknown")
+				msg.Nack(false, false)
+			case NackRequeue:
+				msg.Nack(false, true)
 			}
 		}
 	}()
-
 	return nil
 }
